@@ -1,0 +1,101 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: coalmine_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-coalmine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-coalmine_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-coalmine_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-coalmine}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: coalmine_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coalmine_backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-coalmine}:${POSTGRES_PASSWORD:-coalmine_secret}@db:5432/${POSTGRES_DB:-coalmine_db}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-coalmine}:${POSTGRES_PASSWORD:-coalmine_secret}@db:5432/${POSTGRES_DB:-coalmine_db}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-supersecretkey_change_in_production}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:3000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - uploads_data:/app/uploads
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: coalmine_worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-coalmine}:${POSTGRES_PASSWORD:-coalmine_secret}@db:5432/${POSTGRES_DB:-coalmine_db}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-coalmine}:${POSTGRES_PASSWORD:-coalmine_secret}@db:5432/${POSTGRES_DB:-coalmine_db}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-supersecretkey_change_in_production}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - uploads_data:/app/uploads
+    command: celery -A app.workers.celery_app worker --loglevel=info
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: coalmine_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      VITE_WS_BASE_URL: ${VITE_WS_BASE_URL:-ws://localhost:8000}
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  postgres_data:
+  uploads_data:
